@@ -1,4 +1,4 @@
-# Dados (nao versionados — coorte propria; ver README)
+# Dados (nao versionados - coorte propria; ver README)
 data/
 *.RData
 *.rds
