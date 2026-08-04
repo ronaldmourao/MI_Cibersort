@@ -1,4 +1,4 @@
-﻿---
+---
 title: "AnÃ¡lise Val"
 author: "Ronald Mourao"
 date: "2025-04-18"
