@@ -1260,7 +1260,7 @@ ggsave("figura_decon_customizado_xmeeting.tiff", final_plot,  width = 20, height
 ```
 
 ```{r}
-fig_main <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +  # â†“ altura total reduzida
+fig_main <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +  # â†" altura total reduzida
 
   # A: Wilcoxon
   draw_plot(wilcoxon_deconvolucao, x = 0.00, y = 0.47, width = 1.0, height = 0.51) +
@@ -1352,7 +1352,7 @@ p.mat <- cor_pmat(dados_completo)
 # Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
 #p.mat <- p.mat[genes_literature, c(cell_vector_signif, unique(bac_high_class$bac))]
 
-#eSTRATEGIA PARA RETIRAR CORRELAÃ‡Ã•ES MENORES QUE 0,3. 
+#eSTRATEGIA PARA RETIRAR CORRELAÃ‡Ã-ES MENORES QUE 0,3. 
 p.mat[abs(cor_AB_matrix) <= 0.3] <- 1
 
 
@@ -1442,11 +1442,11 @@ clusterizacao_integracao_PTT
 
 # Agora sim vocÃª pode fazer o layout com rotaÃ§Ã£o:
 final_plot_INT <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +
-  # Parte esquerda â€” dendrogramas
+  # Parte esquerda â€" dendrogramas
   draw_plot(clusterizacao_integracao_GAC, x = 0.00, y = 0.50, width = 0.20, height = 0.5) +
   draw_plot(clusterizacao_integracao_PTT, x = 0.00, y = 0.00, width = 0.20, height = 0.5) +
 
-  # Parte direita â€” heatmaps ou correlogramas
+  # Parte direita â€" heatmaps ou correlogramas
   draw_plot(integracao_GAC, x = 0.20, y = 0.50, width = 0.80, height = 0.5) +
   draw_plot(integracao_PTT, x = 0.20, y = 0.00, width = 0.80, height = 0.5) +
 
@@ -1469,11 +1469,11 @@ ggsave("figura_decon_INT_xmeeting.tiff", plot = final_plot_INT,  width = 25, hei
 
 ```{r}
 final_plot_INT <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +
-  # Parte esquerda â€” dendrogramas (acompanham a altura)
+  # Parte esquerda â€" dendrogramas (acompanham a altura)
   draw_plot(clusterizacao_integracao_GAC, x = 0.00, y = 0.45, width = 0.20, height = 0.55) +
   draw_plot(clusterizacao_integracao_PTT, x = 0.00, y = 0.00, width = 0.20, height = 0.45) +
 
-  # Parte direita â€” heatmaps/correlogramas alongados
+  # Parte direita â€" heatmaps/correlogramas alongados
   draw_plot(integracao_GAC, x = 0.20, y = 0.45, width = 0.80, height = 0.55) +
   draw_plot(integracao_PTT, x = 0.20, y = 0.00, width = 0.80, height = 0.45) +
 
