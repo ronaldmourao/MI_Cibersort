@@ -1,0 +1,1584 @@
+﻿---
+title: "AnÃ¡lise Val"
+author: "Ronald Mourao"
+date: "2025-04-18"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+#===================================================================================== 
+#CARREGAMENTO DE DADOS
+#===================================================================================== 
+
+```{r setup, include=FALSE}
+###DADOS
+
+#####Directory/Libraries/Data
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(hexbin)
+library(readxl)
+library(tibble)
+library(tibble)
+library(writexl)
+
+# The following setting is important, do not omit.
+options(stringsAsFactors = FALSE);
+
+# --- Deteccao portatil da raiz do projeto (substitui setwd hardcoded) ---
+project_root <- function() {
+  if (requireNamespace("knitr", quietly = TRUE)) {
+    input_file <- knitr::current_input()
+    if (nzchar(input_file)) {
+      return(dirname(dirname(normalizePath(input_file, winslash = "/", mustWork = FALSE))))
+    }
+  }
+  args <- commandArgs(FALSE)
+  file_arg <- args[grepl("^--file=", args, fixed = TRUE)][1]
+  if (!is.na(file_arg) && nzchar(file_arg)) {
+    return(dirname(dirname(sub("^--file=", "", file_arg))))
+  }
+  frames <- sys.frames()
+  ofiles <- vapply(frames, function(f) {
+    o <- attr(f, "ofile")
+    if (is.null(o)) NA_character_ else as.character(o)
+  }, character(1))
+  ofiles <- ofiles[!is.na(ofiles)]
+  if (length(ofiles) > 0) return(dirname(dirname(ofiles[length(ofiles)])))
+  getwd()
+}
+setwd(normalizePath(project_root(), winslash = "/"))
+
+# Diretorios ajustaveis por variaveis de ambiente (default: <projeto>/data)
+DATA_DIR <- Sys.getenv("MI_DATA_DIR", unset = file.path(getwd(), "data"))
+QV25_DIR <- Sys.getenv("MI_QV25_DIR", unset = file.path(DATA_DIR, "qv25"))
+
+set.seed(123)
+
+load(file.path(QV25_DIR, "sampleTable_Completo.RData"))
+
+#write.csv2(sampleTable, fileEncoding = "ISO-8859-1",  file = "sampleTable.csv")
+rownames(sampleTable) = sampleTable$files
+sampleTable <- read_excel(file.path(QV25_DIR, "sampleTable.xlsx"))
+rownames(sampleTable) = sampleTable$files
+
+#adiÃ§Ã£o de variavel a partir do clin data
+a = read_excel(file.path(QV25_DIR, "clinical data v2.xlsx")) %>%
+  dplyr::select(cardia, files) %>%
+  filter(files %in% sampleTable$files)
+
+sampleTable <- sampleTable %>%   left_join(a, by = "files")
+rownames(sampleTable) = sampleTable$files
+```
+
+
+#===================================================================================== 
+#DecovoluÃ§Ã£o
+#===================================================================================== 
+```{r}
+#CIBERSORT
+library(quantiseqr)
+library(EPIC)
+
+#DADOS
+sampleTable <- read_excel(file.path(QV25_DIR, "sampleTable.xlsx"))
+rownames(sampleTable) = sampleTable$files
+
+load(file.path(QV25_DIR, "txi_filtered.RData"))
+
+# Calcular RPK (Reads Per Kilobase)
+rpk <- txi$counts / (txi$length + 1)  # Adicionamos +1 para evitar divisÃ£o por zero
+
+# Calcular TPM (normalizando para 1 milhÃ£o)
+tpm_matrix <- t( t(rpk) / colSums(rpk) * 1e6 )
+# TransformaÃ§Ã£o log2
+#tpm_matrix_log <- log2(tpm_matrix + 1)
+
+tpm_matrix = tpm_matrix[,sampleTable$files]
+
+#CIBERSORT
+# Ler um arquivo TXT separado por tabulaÃ§Ã£o
+#dados <- read.table("LM22.txt", header = TRUE, sep = "\t", row.names = 1)
+#genes_para_manter <- rownames(dados) 
+#tpm_matrix <- tpm_matrix[rownames(tpm_matrix) %in% genes_para_manter, ]
+#write.table(tpm_matrix, file = "tpm_matrix.txt", sep = "\t", row.names = T, quote = FALSE)
+
+# Visualizar as primeiras linhas
+#head(dados)
+
+# Carregar o script do CIBERSORT
+source(file.path("code", "CIBERSORT.R"))
+
+# Definir arquivos de entrada
+sig_matrix <- file.path("data", "LM22.txt")  # Assinatura de celulas imunes (referencia publica)
+mixture_file <- file.path("data", "tpm_matrix.txt")  # Expressao genica em TPM
+
+# Rodar o CIBERSORT
+cibersort_results <- CIBERSORT(sig_matrix, mixture_file, 
+                       #perm=1000,
+                       )
+
+#quanTIseq
+quantiseq_results <- run_quantiseq(
+  tpm_matrix,  # Sua matriz de TPM (Transcripts Per Million)
+  is_arraydata  = FALSE,  # Defina como TRUE se os dados forem de microarray
+  is_tumordata  = TRUE
+)
+
+#EPIC
+epic_results <- EPIC::EPIC(bulk = tpm_matrix,
+                           scaleExprs = T,
+                           constrainedSum = T)
+
+# Visualizar os resultados
+head(cibersort_results)
+samplea = as.data.frame(cibersort_results[,1:22]) %>% rename_all(~ paste("cibersort_", ., sep = ""))
+sampleb = as.data.frame(quantiseq_results[,2:12]) %>% rename_all(~ paste("quantiseq_", ., sep = ""))
+samplec = as.data.frame(epic_results$cellFractions[,1:8]) %>% rename_all(~ paste("epic_", ., sep = ""))
+
+#criando os dados de deconvoluÃ§Ã£o
+deconvolucao <- bind_cols(samplea, sampleb, samplec)
+celulas_deconvolucao = colnames(deconvolucao)
+deconvolucao$files = row.names(deconvolucao)
+
+#save(deconvolucao, file = "deconvolucao.RData")
+```
+
+#===================================================================================== 
+#microbiome 
+#===================================================================================== 
+```{r setup, include=FALSE}
+###############LOAD DATA
+setwd(QV25_DIR)
+
+bacteria_abundance = read.delim2(file = "bactab_all_genus.tsv")
+colnames(bacteria_abundance) <- sub("^X", "", colnames(bacteria_abundance))
+row.names(bacteria_abundance) = bacteria_abundance$taxon
+bacteria_abundance = t(bacteria_abundance) %>% as.data.frame #%>% select(-"Hyphomicrobium sp. MC1")
+
+k = intersect( sampleTable$samples, rownames(bacteria_abundance))
+bacteria_abundance = bacteria_abundance[k,] %>% as.data.frame()
+bacteria_abundance$samples = rownames(bacteria_abundance)
+bacteria_abundance = inner_join( sampleTable[,c("samples", "files")], bacteria_abundance, by = "samples") %>% dplyr::select(-samples) %>% column_to_rownames(var = "files") %>% t()
+
+# Salvar os nomes das linhas antes da conversÃ£o
+rownames_bacteria <- rownames(bacteria_abundance)
+# Converter os valores para numÃ©rico, mantendo os nomes das linhas
+bacteria_abundance <- apply(bacteria_abundance, 2, function(x) as.numeric(trimws(x)))
+# Restaurar os nomes das linhas
+rownames(bacteria_abundance) <- rownames_bacteria
+
+bacteria_abundance = t(bacteria_abundance) %>% as.data.frame()
+bacterias_microbioma = colnames(bacteria_abundance)
+bacteria_abundance$files = row.names(bacteria_abundance)
+
+#save(bacteria_abundance, file = "bacteria_abundance.RData")
+
+#vetor de bacterias
+extra_genres = c("Parvimonas","Peptostreptococcus","Campylobacter", "Actinomyces","Escherichia","Klebsiella", "Streptococcus")
+gc_genres_barra <- c("Helicobacter", "Prevotella", "Streptococcus", "Halomonas",
+               "Pseudomonas", "Sphingomonas", "Lactobacillus", "Shewanella",
+               "Acinetobacter", "Corynebacterium", "Bacillus", "Neisseria",
+               "Leptotrichia", "Veillonella", "Bacteroides")
+adj_genres_barra <- c("Helicobacter", "Prevotella", "Sphingomonas", "Halomonas",
+                "Pseudomonas", "Bacteroides", "Streptococcus", "Acinetobacter",
+                "Shewanella", "Faecalibacterium", "Bifidobacterium", "Chryseobacterium",
+                "Bacillus", "Oscillospira", "Veillonella") 
+genres_wizenty <- c("Helicobacter", "Haemophilus", "Actinobacillus", "Neisseria",
+                   "Streptococcus", "Lactobacillus", "Staphylococcus", "Lactococcus",
+                   "Veillonella", "Prevotella", "Porphyromonas", "Propionibacterium",
+                   "Fusobacterium")
+
+classic_bac = unique(c(genres_wizenty, adj_genres_barra, gc_genres_barra, extra_genres))
+filter = t(bacteria_abundance) %>% as.data.frame() %>% dplyr::filter(rownames(.) %in% classic_bac)
+classic_bac = intersect(classic_bac, rownames(filter))
+
+```
+
+#===================================================================================== 
+#DADOS DE EXPRESSAO e clinicos
+#===================================================================================== 
+```{r}
+load(file.path(QV25_DIR, "vsdcodingcompleto.RData"))
+vsd = as.data.frame(t(vsd))
+genes_expressao = as.data.frame(vsd)
+vsd$files = row.names(vsd)
+genames_expressao = colnames(genes_expressao)
+
+variavel_clinica = colnames(sampleTable)
+```
+
+#===================================================================================== 
+#INTEGRACAO
+#===================================================================================== 
+```{r}
+amostras_comuns = Reduce(intersect, list(rownames(bacteria_abundance),
+                       rownames(vsd),
+                       rownames(deconvolucao),
+                       row.names(sampleTable)
+                       ))
+
+
+dados_gerais <- bacteria_abundance %>%
+  left_join(vsd, by = "files") %>%
+  left_join(deconvolucao, by = "files") %>% 
+  left_join(sampleTable, by = "files") %>%
+  column_to_rownames("files")
+dados_gerais$files = rownames(dados_gerais)
+
+dados_gerais = dados_gerais %>% dplyr::filter(type == "GAC") %>% dplyr::filter(lauren_type == c("Intestinal", "Diffuse"))
+
+```
+
+
+```{r}
+save(cell_vector_signif, bac_high_class, genes_literature ,celulas_deconvolucao, bacterias_microbioma, classic_bac, genames_expressao, variavel_clinica, dados_gerais, dark2_extended, file = "dados_gerais2.RData") #coloquei o 2
+
+load(file.path(QV25_DIR, "dados_gerais2.RData")) #coloquei o 2
+
+```
+
+
+```{r}
+write_xlsx(dados_gerais[,24662:ncol(dados_gerais)], path = "analiserevisores.xlsx")
+(dados_gerais$sample)
+```
+
+#===================================================================================== 
+#PALETA
+#===================================================================================== 
+```{r setup, include=FALSE}
+brasil_nativo <- c( "#8B0000", "#00008B",  "#B8860B",  "#228B22", "#FF6347", "#4B0082", "#DC143C", "#800080", "#008B8B", "#8B4513",  "#6A5ACD", "#5F9EA0",  "#D2691E", "#2F4F4F",  "#FFA500",  "#2E8B57",  "#1E90FF",  "#A52A2A", "#3CB371", "#B22222", "#20B2AA", "#9ACD32", "#9932CC",  "#DEB887", "#468499", "#556B2F", "#FF1493","#7FFF00","#483D8B", "#C71585","#3B5323","#FFD700", "#B22222", "#BDB76B", "#8A2BE2", "#F08080", "#A0522D", "#FF4500","#FF1493", "#4169E1", "#800000", "#DDA0DD", "#FFD700", "#FF8C00", "#00FA9A","#CD5C5C","#008080", "#708090","#4682B4")
+
+
+
+dark2_extended <- function(n, groups = NULL) {
+  if (n > length(brasil_nativo)) {
+    stop(paste("MÃ¡ximo de", length(brasil_nativo), "categorias suportado sem interpolaÃ§Ã£o."))
+  }
+  selected_colors <- brasil_nativo[1:n]
+  if (!is.null(groups)) {
+    names(selected_colors) <- groups
+  }
+  return(selected_colors)
+}
+```
+
+#===================================================================================== 
+#ANALISES COM OS DADOS MICROBIOME
+#===================================================================================== 
+
+```{r setup, include=FALSE}
+# Carregar pacotes
+library(phyloseq)
+library(microbiome)
+library(taxize)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+#inserido pseudocounts
+library(dplyr)
+
+#inserir pseudocount
+#dados_gerais <- dados_gerais %>%  mutate(across(all_of(bacterias_microbioma), ~ . + 1))
+
+#pode tambem adicionar 1 e tirar o log2
+#dados_gerais <- dados_gerais %>%  mutate(across(all_of(bacterias_microbioma), ~ log2(. + 1)))
+
+
+# 1. GERAR DADOS FICTÃCIOS
+
+generos <- colnames(dados_gerais[bacterias_microbioma,])
+
+otu_matrix <- as.matrix(dados_gerais[,bacterias_microbioma])
+
+meta <- dados_gerais[,c("lauren_type", "samples")] %>% dplyr::select(-samples)
+type
+########### 
+#RECUPERAR TAXONOMIA AUTOMÃTICA
+###########
+
+#classificacoes <- classification(generos, db = "ncbi")
+#save(classificacoes, file = "classificacoes_taxonomicas.RData")
+
+load("classificacoes_taxonomicas.RData")
+
+# Definir os ranks principais que vocÃª quer manter
+ranks_principais <- c("acellular root","kingdom", "phylum", "class", "order", "family", "genus")
+
+# Filtrar apenas os data.frames vÃ¡lidos da lista
+classificacoes_validas <- classificacoes[sapply(classificacoes, is.data.frame)]
+
+# Combinar e filtrar os ranks desejados
+library(dplyr)
+library(tidyr)
+
+df_tax <- bind_rows(classificacoes_validas, .id = "Genero") %>%
+  filter(rank %in% ranks_principais) %>%
+  dplyr::select(Genero, rank, name)
+
+# Pivotar para formato largo e retirar virus
+df_tax_wide <- df_tax %>%
+  pivot_wider(names_from = rank, values_from = name) %>% 
+  tibble::column_to_rownames("Genero")%>% 
+#  filter(is.na(`acellular root`) | `acellular root` != "Viruses") %>% ##retira todos os virus
+    dplyr::select(-`acellular root`)
+
+# Visualizar
+print(df_tax_wide)
+
+# Juntar tudo
+tabela_tax <- bind_rows(df_tax_wide)
+tax_tab <- tax_table(as.matrix(tabela_tax))
+
+
+########### 
+#CALCULO DE DIVERSIDADE
+###########
+
+#filtro otu_matrix so de bacterias
+
+otu_tab <- otu_table(t(otu_matrix[,rownames(tax_tab)]), taxa_are_rows = T)
+sample_tab <- sample_data(meta)
+ps <- phyloseq(otu_tab, tax_tab, sample_tab)
+
+
+# 4. CALCULAR TODOS OS ÃNDICES DE DIVERSIDADE ALFA
+alpha_microbiome <- microbiome::alpha(ps, index = "all")
+alpha_phyloseq <- estimate_richness(ps, measures = c("Observed", "Chao1", "Shannon"))
+
+# Renomear colunas para evitar conflito
+colnames(alpha_phyloseq) <- paste0(colnames(alpha_phyloseq), "_phyloseq")
+colnames(alpha_microbiome) <- paste0(colnames(alpha_microbiome), "_microbiome")
+# Consolidar
+alpha_combined <- cbind(sample_data(ps), alpha_phyloseq, alpha_microbiome)
+
+# 5. GRÃFICO + TESTE DE WILCOXON (SHANNON)
+
+library(ggplot2)
+library(ggpubr)
+
+p.shannon <- ggplot(alpha_combined, aes(x = lauren_type, y = Shannon_phyloseq, fill = lauren_type)) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA, color = "black") +  # Boxplot transparente
+  geom_jitter(aes(color = lauren_type), size = 2, width = 0.2, alpha = 0.6) +            # Bolinhas sobrepostas
+  scale_fill_manual(values = c(Intestinal = "#B22222", Diffuse = "#008080")) +
+  scale_color_manual(values = c(Intestinal = "#B22222", Diffuse = "#008080")) +
+  stat_compare_means(method = "wilcox.test", label = "p.format",
+                     label.y = max(alpha_combined$Shannon_phyloseq, na.rm = TRUE) * 1.1) +
+  labs( x = "Shannon Diversity", y = "Shannon Index") +
+  theme_minimal() +   theme(
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+p.shannon
+
+
+alpha_combined <- alpha_combined %>%
+  mutate(delta_richness = Chao1_phyloseq - Observed_phyloseq)
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Supondo que vocÃª tem:
+
+# Reestruturar os dados para formato longo
+alpha_long <- alpha_combined %>%
+  dplyr::select(lauren_type, Observed_phyloseq, Chao1_phyloseq) %>%
+  pivot_longer(cols = c(Observed_phyloseq, Chao1_phyloseq),
+               names_to = "Index", values_to = "Value") %>%
+  mutate(Index = recode(Index,
+                        "Observed_phyloseq" = "Observed",
+                        "Chao1_phyloseq" = "Chao1"))
+
+# GrÃ¡fico
+p.richness <- ggplot(alpha_long, aes(x = lauren_type, y = Value, fill = Index)) +
+  geom_boxplot(alpha = 0.6, position = position_dodge(0.8), color = "black") +
+  geom_jitter(aes(color = Index), size = 1.5, alpha = 0.5,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8)) +
+  scale_fill_manual(values = c(Observed = "#D95F02", Chao1 = "#7570B3")) +
+  scale_color_manual(values = c(Observed = "#D95F02", Chao1 = "#7570B3")) +
+  labs(x = "Richness Estimation: Observed vs. Chao1", y = "Species Richness") +
+  theme_minimal()  + theme(
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+p.richness
+
+
+############### GENES TOP ABUNDANTE NO TUMOR
+
+# Carregar pacotes
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(purrr)
+library(tibble)
+
+# 1. PreparaÃ§Ã£o dos dados
+a <- dados_gerais[,c(bacterias_microbioma, "lauren_type")] %>%
+  mutate(across(c(bacterias_microbioma), ~ . + 1))
+
+#retirando virus
+a <- a[, c(rownames(df_tax_wide), "lauren_type")]
+a$sample <- row.names(a)
+
+dados <- a %>%
+  pivot_longer(
+    cols = -c(sample, lauren_type),
+    names_to = "genus",
+    values_to = "counts"
+  )
+
+# 
+matriz_wide <- dados %>%
+  dplyr::select(genus, sample, counts) %>%
+  pivot_wider(names_from = sample, values_from = counts) %>%
+  column_to_rownames("genus")
+
+col_data <- dados %>%
+  distinct(sample, lauren_type) %>%
+  column_to_rownames("sample")
+
+
+# 6. Score de abundÃ¢ncia
+calc_score <- function(tab){
+  tab[tab == 0] <- NA
+  pos <- matrix(as.numeric(unlist(tab)), nrow = nrow(tab))
+  rownames(pos) <- rownames(tab); colnames(pos) <- colnames(tab)
+  for (i in 1:ncol(tab)){
+    pos[order(tab[, i], decreasing = TRUE, na.last = NA), i] <- 1:sum(!is.na(tab[, i]))
+  }
+  freq <- rowMeans(!is.na(pos))
+  score <- rowMeans(pos, na.rm = TRUE) * (1.1 - freq)
+  data.frame(genus = rownames(tab), score = score, freq = freq)
+}
+
+tabela.m <- purrr::map_dfr(unique(dados$lauren_type), function(cond) {
+  subset <- dados %>%
+    filter(lauren_type == cond) %>%
+    dplyr::select(genus, sample, counts) %>%
+    pivot_wider(names_from = sample, values_from = counts) %>%
+    column_to_rownames("genus") %>%
+    as.matrix()
+
+  rel <- prop.table(subset, 1)
+  sc <- calc_score(subset)
+
+  counts_m <- reshape2::melt(subset)
+  colnames(counts_m) <- c("genus", "sample", "counts")
+
+  rel_m <- reshape2::melt(rel)
+  colnames(rel_m) <- c("genus", "sample", "relative")
+
+  left_join(counts_m, rel_m, by = c("genus", "sample")) %>%
+    left_join(sc, by = "genus") %>%
+    mutate(condition = cond)
+})
+
+#nÃºmeros de genes para identificaÃ§Ã£o
+topnumber = 15
+
+# 7. Top 15 por score
+top15 <- tabela.m %>%
+  group_by(condition, genus) %>%
+  summarise(score = mean(score), freq = mean(freq), abundance = sum(relative), .groups = "drop") %>%
+  group_by(condition) %>%
+  slice_min(order_by = score, n = topnumber)
+
+
+#GrÃ¡ficos
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(patchwork)
+library(RColorBrewer)
+library(colorspace)
+library(ggrepel)
+library(cowplot)
+
+
+# AbundÃ¢ncia relativa
+rel_abund <- prop.table(as.matrix(dados_gerais[, row.names(df_tax_wide)]), 1) %>% as.data.frame()
+rel_abund$files <- rownames(rel_abund)
+
+
+# Long format + taxonomia + grupo
+rel_abund_long <- pivot_longer(rel_abund, -files, names_to = "Genero", values_to = "Abundance") %>%
+  left_join(df_tax_wide, by = c("Genero" = "genus")) %>%
+  left_join(dados_gerais[, c("files", "lauren_type")], by = "files")
+rel_abund_long$Sample = rel_abund_long$files
+
+#===============================
+# 1. GRÃFICO DE PIZZA - Top 10 Phyla
+#===============================
+
+# 1. Calcular abundÃ¢ncia total por filo
+df_pizza <- rel_abund_long %>%
+  mutate(phylum = ifelse(is.na(phylum), "Unclassified", phylum)) %>%
+  group_by(phylum) %>%
+  summarise(Abundancia = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(Abundancia))
+
+# 2. Selecionar os 15 filos mais abundantes (excluindo "Unclassified")
+top15_phyla <- df_pizza %>%
+  filter(phylum != "Unclassified") %>%
+  slice_head(n = 10) %>%
+  pull(phylum)
+
+# 3. Reagrupar: manter top 15 e agrupar o restante como "Others"
+df_pizza <- df_pizza %>%
+  mutate(PhylumGroup = ifelse(phylum %in% top15_phyla, phylum, "Others")) %>%
+  group_by(PhylumGroup) %>%
+  summarise(Abundancia = sum(Abundancia), .groups = "drop") %>%
+  arrange(desc(Abundancia)) %>%
+  mutate(
+    Percent = Abundancia / sum(Abundancia) * 100,
+    ymax = cumsum(Percent),
+    ymin = lag(ymax, default = 0),
+    ymid = (ymax + ymin) / 2,
+    legend_label = paste0(PhylumGroup, " (", round(Percent, 1), "%)"),
+    PhylumGroup = factor(PhylumGroup, levels = c(setdiff(PhylumGroup, "Others"), "Others"))
+  )
+
+# 4. Plotar grÃ¡fico de pizza com categoria "Others" e legenda formatada
+plot_pizza <- ggplot(df_pizza, aes(x = 1, y = Percent, fill = PhylumGroup)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.4, "cm")
+  ) +
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE, title = "Phyla")) +
+  scale_fill_manual(
+    values = dark2_extended(length(unique(df_pizza$PhylumGroup))),
+    labels = df_pizza$legend_label,
+    breaks = c(setdiff(df_pizza$PhylumGroup, "Others"), "Others")
+  )
+
+print(plot_pizza)
+
+
+
+
+#===============================
+# 2. BARRA - Top 15 FamÃ­lias (com percentual na legenda)
+#===============================
+
+# Etapa 1: calcular abundÃ¢ncia total por famÃ­lia
+df_family <- rel_abund_long %>%
+  mutate(family = ifelse(is.na(family) | is.nan(family), "Unclassified", family)) %>%
+  group_by(family) %>%
+  summarise(TotalAbund = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalAbund))
+
+# Etapa 2: selecionar top 15 famÃ­lias (excluindo "Unclassified")
+top15_families <- df_family %>%
+  filter(family != "Unclassified") %>%
+  slice_head(n = 15) %>%
+  pull(family)
+
+# Etapa 3: incluir "Others", calcular abundÃ¢ncia relativa por amostra
+df_family_plot <- rel_abund_long %>%
+  mutate(family = ifelse(is.na(family) | is.nan(family), "Unclassified", family)) %>%
+  mutate(FamilyGroup = ifelse(family %in% top15_families, family, "Others")) %>%
+  group_by(Sample, lauren_type, FamilyGroup) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Sample) %>%
+  mutate(RelAbund = Abundance / sum(Abundance) * 100) %>%
+  ungroup()
+
+# Etapa 4: gerar legenda com percentuais GAC, PTT e Total
+family_legend <- df_family_plot %>%
+  group_by(FamilyGroup, lauren_type) %>%
+  summarise(Total = sum(RelAbund), .groups = "drop") %>%
+  pivot_wider(names_from = lauren_type, values_from = Total, values_fill = 0) %>%
+  mutate(
+    Total = round(Intestinal + Diffuse, 1),
+    Percent_Intestinal = round(Intestinal / Total * 100, 1),
+    Percent_Diffuse = round(Diffuse / Total * 100, 1),
+    Percent_Total = round(Total / sum(Total) * 100, 1),
+    Label = paste0(FamilyGroup, " (Intestinal: ", Percent_Intestinal, "%, Diffuse: ", Percent_Diffuse, "%, Total: ", Percent_Total, "%)")
+  )
+
+# Etapa 5: definir ordem dos fatores (incluindo â€œOthersâ€ no final)
+family_levels <- c(setdiff(family_legend$FamilyGroup, "Others"), "Others")
+family_labels_fmt <- family_legend %>%
+  filter(FamilyGroup %in% family_levels) %>%
+  arrange(factor(FamilyGroup, levels = family_levels)) %>%
+  pull(Label)
+
+# Etapa 6: gerar grÃ¡fico
+plot_family <- ggplot(df_family_plot, aes(x = Sample, y = RelAbund, fill = factor(FamilyGroup, levels = family_levels))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ lauren_type, scales = "free_x") +
+  theme_bw() +
+  labs(y = "Relative abundance (%)", x = NULL) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 8.5),
+    legend.key.size = unit(0.3, "cm")
+  ) +
+  scale_fill_manual(
+    values = dark2_extended(length(family_levels)),
+    labels = family_labels_fmt,
+    breaks = family_levels
+  ) +
+  guides(fill = guide_legend(nrow = 6, ncol = 3, byrow = TRUE, title = "Families"))
+
+print(plot_family)
+
+
+
+#===============================
+# 3. BARRA - Top 15 Genera (com percentual na legenda)
+#===============================
+
+# Etapa 1: calcular abundÃ¢ncia total por gÃªnero
+df_genus <- rel_abund_long %>%
+  mutate(Genero = ifelse(is.na(Genero) | is.nan(Genero), "Unclassified", Genero)) %>%
+  group_by(Genero) %>%
+  summarise(TotalAbund = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalAbund))
+
+# Etapa 2: selecionar os 15 Genera mais abundantes, excluindo "Unclassified"
+top15_genera <- df_genus %>%
+  filter(Genero != "Unclassified") %>%
+  slice_head(n = 15) %>%
+  pull(Genero)
+
+# Etapa 3: incluir "Others", calcular abundÃ¢ncia relativa por amostra
+df_genus_plot <- rel_abund_long %>%
+  mutate(Genero = ifelse(is.na(Genero) | is.nan(Genero), "Unclassified", Genero)) %>%
+  mutate(GenusGroup = ifelse(Genero %in% top15_genera, Genero, "Others")) %>%
+  group_by(Sample, lauren_type, GenusGroup) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Sample) %>%
+  mutate(RelAbund = Abundance / sum(Abundance) * 100) %>%
+  ungroup()
+
+
+# Etapa 4: legenda com percentuais GAC, PTT e Total
+genus_legend <- df_genus_plot %>%
+  group_by(GenusGroup, lauren_type) %>%
+  summarise(Total = sum(RelAbund), .groups = "drop") %>%
+  pivot_wider(names_from = lauren_type, values_from = Total, values_fill = 0) %>%
+  mutate(
+    Total = round(Intestinal + Diffuse, 1),
+    Percent_Intestinal = round(Intestinal / Total * 100, 1),
+    Percent_Diffuse = round(Diffuse / Total * 100, 1),
+    Percent_Total = round(Total / sum(Total) * 100, 1),
+    Label = paste0(GenusGroup, " (Intestinal: ", Percent_Intestinal, "%, Diffuse: ", Percent_Diffuse, "%, Total: ", Percent_Total, "%)")
+  )
+
+
+# Etapa 5: definir ordem dos fatores e rÃ³tulos formatados
+genus_levels <- c(setdiff(genus_legend$GenusGroup, "Others"), "Others")
+genus_labels_fmt <- genus_legend %>%
+  filter(GenusGroup %in% genus_levels) %>%
+  arrange(factor(GenusGroup, levels = genus_levels)) %>%
+  pull(Label)
+
+# Etapa 6: gerar grÃ¡fico
+plot_genus <- ggplot(df_genus_plot, aes(x = Sample, y = RelAbund, fill = factor(GenusGroup, levels = genus_levels))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ lauren_type, scales = "free_x") +
+  theme_bw() +
+  labs(y = "Relative abundance (%)", x = NULL) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 8.5),
+    legend.key.size = unit(0.3, "cm")
+  ) +
+  scale_fill_manual(
+    values = dark2_extended(length(genus_levels)),
+    labels = genus_labels_fmt,
+    breaks = genus_levels
+  ) +
+  guides(fill = guide_legend(nrow = 6, ncol = 3, byrow = TRUE, title = "Genera"))
+
+print(plot_genus)
+
+
+#===============================
+# GRÃFICOS AGRUPADOS
+#===============================
+
+
+###############DATA FRAME COM OS TRES
+bac_high_class <- data.frame(
+  bac = c(top15$genus, classic_bac),
+  origen = NA
+)
+
+# Preencher a coluna 'origen' com base na origem
+bac_high_class$origen <- ifelse(
+  bac_high_class$bac %in% unique(top15$genus), 
+  "bacdif", 
+  "classic_bac"
+)
+
+
+##abundancia bac segundo modelo do artigo
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(ggbreak)
+library(ggpubr)
+
+# Transformar bacteria_abundance em formato longo
+bacteria_long <-as.data.frame(dados_gerais[,c(unique(bac_high_class$bac), "lauren_type")]) %>%
+  pivot_longer(-lauren_type, names_to = "Taxon", values_to = "Abundance")
+
+# Calcular mÃ©dias das proporÃ§Ãµes por grupo (Normal/Tumor)
+mean_proportions <- bacteria_long %>%
+  group_by(Taxon, lauren_type) %>%
+  summarise(Mean_Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop")
+
+# Teste de Wilcoxon para cada tÃ¡xon
+wilcox_results <- bacteria_long %>%
+  group_by(Taxon) %>%
+  summarise(p_value = wilcox.test(Abundance ~ lauren_type)$p.value) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  arrange(p_adj)
+
+# Calcular diferenÃ§a de mÃ©dias e intervalo de confianÃ§a 95%
+# Calcular mÃ©dias das proporÃ§Ãµes por grupo (GAC e PTT)
+mean_proportions <- bacteria_long %>%
+  group_by(Taxon, lauren_type) %>%
+  summarise(Mean_Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop")
+
+# Teste de Wilcoxon para cada tÃ¡xon
+wilcox_results <- bacteria_long %>%
+  group_by(Taxon) %>%
+  summarise(p_value = wilcox.test(Abundance ~ lauren_type)$p.value) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  arrange(p_adj)
+
+# Calcular diferenÃ§a de mÃ©dias e intervalo de confianÃ§a 95%
+diff_means <- mean_proportions %>%
+  pivot_wider(names_from = lauren_type, values_from = Mean_Abundance) %>%
+  mutate(Diff = Intestinal - Diffuse) %>%
+  left_join(wilcox_results, by = "Taxon") %>%
+  mutate(lower = Diff - 1.96 * sd(Diff, na.rm = TRUE),
+         upper = Diff + 1.96 * sd(Diff, na.rm = TRUE),
+         Higher_in = ifelse(Diff > 0, "Intestinal", "Diffuse"))
+
+# Definir ordem fixa dos tÃ¡xons
+taxon_order <- diff_means$Taxon
+
+library(ggh4x)
+
+# GrÃ¡fico de barras das mÃ©dias de proporÃ§Ã£o por grupo (quebra de eixo)
+
+p1 <- ggplot(mean_proportions, aes(x = factor(Taxon, levels = taxon_order), y = Mean_Abundance, fill = lauren_type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_continuous(breaks = c(0, 7, 70, 700, 7000), trans = "log1p") +
+  coord_flip() +
+  scale_fill_manual(values = c("Intestinal" = "#B22222", "Diffuse" = "#008080")) +
+  theme_minimal() +
+  labs(x = "Taxon", y = "Mean proportion (log scale)", fill = "Group") +
+  theme(
+    legend.position = "top",
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12, vjust = 1),
+    axis.text.x  = element_text(size = 10),
+    axis.text.y  = element_text(size = 10)
+  ) +
+  force_panelsizes(rows = c(0.6, 0.4))
+
+p1
+
+
+library(ggplot2)
+
+# Criar um novo dataframe para os pontos fora dos limites do eixo X
+out_of_bounds <- diff_means %>%
+  filter(Diff < -200 | Diff > 200)  # Seleciona os valores que estÃ£o fora do intervalo
+
+# GrÃ¡fico principal
+p2 <- ggplot(diff_means, aes(x = Diff, y = factor(Taxon, levels = taxon_order))) +
+  geom_point(aes(color = Higher_in), size = 3) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper, color = Higher_in), height = 0.2) +
+  scale_color_manual(values = c("Intestinal" = "#B22222", "Diffuse" = "#008080")) +
+  geom_text(aes(label = sprintf("%.4f", p_adj)), hjust = -0.2, size = 3) +
+  geom_text(data = out_of_bounds, 
+            aes(x = ifelse(Diff < -200, -180, 180),
+                y = factor(Taxon, levels = taxon_order), 
+                label = sprintf("%.4f", p_adj)), 
+            color = "black", size = 3, 
+            hjust = ifelse(out_of_bounds$Diff < -200, 1, 0), 
+            vjust = 0, fontface = "italic") +
+  scale_x_continuous(breaks = c(-200, -100, -50, -25, 0, 25, 50, 100, 200), limits = c(-200, 200)) +
+  labs(x = "Difference in mean proportions", y = "Taxon", color = "Higher in") +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12, vjust = 0),
+    axis.text.x  = element_text(size = 10),
+    axis.text.y  = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10)
+  )
+
+
+p2
+
+
+#CORRELAÃ‡ÃƒO. Verificar se faz sentido selecionar somente o GAC
+
+library(MASS)
+library(tibble)
+library(factoextra)
+library(cluster)
+library(dplyr)
+
+genes_literature = c(
+  "PDCD1", "CD274", "CTLA4", "LAG3", "HAVCR2", "CD47",
+  "IFNG", "TNF", "IL6", "IL1B", "IL10", "TGFB1",
+  "CXCL8", "CCL2", "CCL5", "FOXP3", "CD163", "CD68", "CD86",
+  "MS4A1", "CD83", "STAT3", "MYD88", "NFKB1",
+  "B2M", "HLA.A", "IDO1", "VEGFA", "PIGR", "SOX9"
+)
+
+#pode tambem adicionar 1 e tirar o log2
+dados_completo <- dados_gerais %>%  
+  mutate(across(all_of(c(unique(bac_high_class$bac), genes_literature)), ~ log2(. + 1))) %>% 
+  mutate(across(all_of(c(genes_literature, unique(bac_high_class$bac))), ~ as.numeric(scale(.)))) %>% 
+  dplyr::select(all_of(c(unique(bac_high_class$bac), genes_literature, "lauren_type")))
+
+
+dados_completo <- dados_completo %>%
+  mutate(across(where(is.factor), as.numeric)) %>%
+  mutate(across(where(is.character), ~ as.numeric(factor(.))))
+
+library(ggcorrplot)
+
+# Matriz de correlaÃ§Ã£o
+cor_AB_matrix <- cor(dados_completo, method = "spearman", use = "complete.obs")
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+cor_AB_matrix[c(genes_literature, "lauren_type"), c(genes_literature, "lauren_type")] <- NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+cor_AB_matrix[bac_high_class$bac,bac_high_class$bac] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+cor_AB_matrix <- cor_AB_matrix[c(genes_literature, "lauren_type"), bac_high_class$bac]
+# Matriz de p-valores
+p.mat <- cor_pmat(dados_completo)
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+p.mat[c(genes_literature, "lauren_type"), c(genes_literature, "lauren_type")] <- NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+p.mat[bac_high_class$bac,bac_high_class$bac] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+p.mat <- p.mat[c(genes_literature, "lauren_type"), bac_high_class$bac]
+
+#ESTRATEGIA
+p.mat[abs(cor_AB_matrix) <= abs(0.3)] <- 1
+p.mat[abs(p.mat) > abs(0.05)] <- 1
+cor_AB_matrix[abs(p.mat) > abs(0.05)] <- 0
+
+
+
+gg_corr <- ggcorrplot(t(cor_AB_matrix),
+                      p.mat = t(p.mat),
+                      sig.level = 0.05,
+                      insig = "blank",               # Esconde correlaÃ§Ãµes nÃ£o significativas
+                      type = "full",                 # Matriz completa (nÃ£o sÃ³ triÃ¢ngulo)
+                      lab = TRUE,                    # Mostra valores numÃ©ricos
+                      lab_size = 2.5,
+                      tl.cex = 10,                    # Tamanho dos nomes das variÃ¡veis
+                      colors = c("#B22222", "white", "#008080"),
+                      outline.color = "gray",
+                      ggtheme = ggplot2::theme_gray) + theme(aspect.ratio = 0.3)
+
+
+cor_AB_matrix = as.data.frame(cor_AB_matrix)
+cor_AB_matrix$gene = rownames(cor_AB_matrix)
+write_xlsx(cor_AB_matrix, path = "gg_corr.xlsx")
+
+# === PASSO 2: Combine com Others ggplots ===
+
+library(cowplot)
+
+final_plot <- ggdraw(xlim = c(0, 1), ylim = c(0, 1.38)) +  # aumentei o ylim total
+
+  # Linha 1
+  draw_plot(p.shannon,   x = 0,    y = 1.09, width = 0.25, height = 0.25) +
+  draw_plot(p.richness,  x = 0.25, y = 1.09, width = 0.25, height = 0.25) +
+  draw_plot(plot_pizza,  x = 0.5,  y = 1.09, width = 0.5,  height = 0.25) +
+
+  # Linha 2
+  draw_plot(plot_family, x = 0,    y = 0.71, width = 0.5,  height = 0.35) +
+  draw_plot(plot_genus,  x = 0.5,  y = 0.71, width = 0.5,  height = 0.35) +
+
+  # Linha 3
+  draw_plot(p1,          x = 0,    y = 0.4, width = 0.5,  height = 0.3) +
+  draw_plot(p2,          x = 0.5,  y = 0.4, width = 0.5,  height = 0.3) +
+
+  # Linha 4 - corrplot mais alto
+  draw_plot(gg_corr, x = 0, y = 0, width = 1, height = 0.4) +  # aumento da altura aqui
+
+  # Labels
+  draw_plot_label(
+    label = c("A", "B", "C", "D", "E", "F", "G", "H"),
+    size = 15,
+    x = c(0.01, 0.25, 0.5, 0.01, 0.5, 0.01, 0.5, 0.01),
+    y = c(1.35, 1.35, 1.35, 1.07, 1.07, 0.72, 0.72, 0.39)
+  )
+
+# ExportaÃ§Ã£o recomendada
+ggsave("figura_layout_customizado_IM.pdf", plot = final_plot, width = 20, height = 28, units = "in", dpi = 300)
+ggsave("figura_layout_customizado_IM.tiff", final_plot,  width = 20, height = 28, units = "in", dpi = 500, compression = "lzw")
+
+
+
+```
+
+```{r}
+library(cowplot)
+
+final_plot_main <- ggdraw(xlim = c(0, 1), ylim = c(0, 1.12)) +
+
+  # Linha 1: Diversidade e pizza
+  draw_plot(p.shannon,   x = 0,    y = 0.87, width = 0.25, height = 0.25) +
+  draw_plot(p.richness,  x = 0.25, y = 0.87, width = 0.25, height = 0.25) +
+  draw_plot(plot_pizza,  x = 0.5,  y = 0.87, width = 0.5,  height = 0.25) +
+
+  # Linha 2: ComparaÃ§Ãµes (p1 e p2)
+  draw_plot(p1,          x = 0,    y = 0.45, width = 0.5,  height = 0.40) +
+  draw_plot(p2,          x = 0.5,  y = 0.45, width = 0.5,  height = 0.40) +
+
+  # Linha 3: CorrelaÃ§Ãµes
+  draw_plot(gg_corr,     x = 0,    y = 0,    width = 1,    height = 0.53) +
+
+  # Labels: alinhados com os plots
+  draw_plot_label(
+    label = c("A", "B", "C", "D", "E", "F"),
+    size = 15,
+    x = c(0.01, 0.26, 0.5, 0.01, 0.51, 0.01),
+    y = c(1.11, 1.11, 1.11, 0.86, 0.86, 0.45)  # F ajustado prÃ³ximo ao gg_corr
+  )
+
+# Exportar
+ggsave("figura_layout_customizado_main_FINAL.pdf", final_plot_main, width = 20, height = 22, units = "in", dpi = 300)
+ggsave("figura_layout_customizado_main_FINAL.tiff", final_plot_main, width = 20, height = 22, units = "in", dpi = 300, compression = "lzw")
+
+```
+
+```{r}
+library(cowplot)
+
+supp_plot <- ggdraw(xlim = c(0, 1), ylim = c(0, 1.02)) +
+  draw_plot(plot_family, x = 0, y = 0.51, width = 1, height = 0.5) +
+  draw_plot(plot_genus,  x = 0, y = 0.00, width = 1, height = 0.5) +
+  draw_plot_label(
+    label = c("A", "B"),
+    size = 15,
+    x = c(0.01, 0.01),
+    y = c(1.01, 0.51)
+  )
+
+# ExportaÃ§Ã£o
+ggsave("figura_suplementar_familia_genero.pdf", supp_plot, width = 12, height = 12, units = "in", dpi = 300)
+ggsave("figura_suplementar_familia_genero.tiff", supp_plot, width = 12, height = 12, units = "in", dpi = 300, compression = "lzw")
+
+```
+
+
+#===================================================================================== 
+#ANALISES COM OS DADOS  DECONV
+#===================================================================================== 
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+
+a = as.data.frame(dados_gerais[,c("quantiseq_B.cells", "lauren_type")]) %>% dplyr::filter(lauren_type == "Diffuse") %>% dplyr::select(-lauren_type)
+mean(a$quantiseq_B.cells)
+
+# Convertendo a tabela para data frame, caso nÃ£o seja
+resultado_long <- as.data.frame(dados_gerais[,c(celulas_deconvolucao, "lauren_type")]) %>%
+  rownames_to_column("sample") %>%
+  gather(key = "cell_type", value = "fraction", -lauren_type, -sample)
+
+# Transformar a variÃ¡vel 'sample' em fator para manter a ordenaÃ§Ã£o correta
+resultado_long$lauren_type <- factor(resultado_long$lauren_type, levels = unique(resultado_long$lauren_type))
+
+# Normalizar os valores de fraÃ§Ã£o dentro de cada amostra
+resultado_long <- resultado_long %>%
+  group_by(sample) %>%
+  mutate(fraction = fraction / sum(fraction, na.rm = TRUE)) %>%  # Recalcula a proporÃ§Ã£o
+  ungroup()
+
+# Filtrar apenas as colunas relevantes
+resultado_long <- resultado_long %>%
+  filter(!is.na(lauren_type))  # Remover valores sem classificaÃ§Ã£o de tecido
+
+
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(scales)  # Para formatar os valores em notaÃ§Ã£o cientÃ­fica
+
+# Calcular os valores de p para cada tipo de cÃ©lula
+p_values <- resultado_long %>%
+  group_by(cell_type) %>%
+  summarise(
+    p_value = wilcox.test(fraction ~ lauren_type, exact = F)$p.value
+  )
+
+# Aplicar a correÃ§Ã£o de mÃºltiplos testes (FDR - Benjamini-Hochberg)
+p_values <- p_values %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr"))
+
+# Criar um dataframe para exibir os valores ajustados no grÃ¡fico
+p_labels <- p_values %>%
+  mutate(label = ifelse(p_adjusted > 0.05, "ns", formatC(p_adjusted, format = "e", digits = 2)))  # Substitui por "ns" se p > 0.05
+
+p_labels
+
+write_xlsx(as.data.frame(p_labels), path = "p_labels.xlsx")
+
+# Criar uma tabela com o mÃ¡ximo para cada cÃ©lula
+max_values <- resultado_long %>%
+  group_by(cell_type) %>%
+  summarise(max_fraction = max(fraction, na.rm = TRUE))
+
+wilcoxon_deconvolucao = ggplot(resultado_long, aes(x = lauren_type, y = fraction, fill = lauren_type)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_jitter(shape = 21, width = 0.2, alpha = 0.6) +
+  facet_wrap(~ cell_type, scales = "free_y") +
+  scale_fill_manual(values = c("Intestinal" = "#B22222", "Diffuse" = "#008080")) +
+  labs(x = "Tissue", y = "Cellular Fraction") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(
+    data = p_labels %>% left_join(max_values, by = "cell_type"), 
+    aes(x = 1.5, y = max_fraction, label = label), 
+    inherit.aes = FALSE
+  )
+
+library(MASS)
+library(tibble)
+library(factoextra)
+library(cluster)
+library(dplyr)
+#CORRELAÃ‡ÃƒO COM TIPOS CELULARES E HUBS
+cell_vector_signif <- p_values$cell_type[p_values$p_adjusted <= 1] %>% as.vector()
+
+
+#pode tambem adicionar 1 e tirar o log2
+dados_completo <- dados_gerais %>%  
+  mutate(across(all_of(c(cell_vector_signif, genes_literature)), ~ log2(. + 1))) %>% #colocar log2 para normalizacao
+  mutate(across(all_of(c(cell_vector_signif, genes_literature)), ~ scale(.))) %>% 
+  dplyr::select(all_of(c(cell_vector_signif, genes_literature, "lauren_type"))) %>% #selecao so das variaveis de interesse
+  dplyr::filter(lauren_type == "Diffuse") %>% #selecionar so cancer
+  dplyr::select(-lauren_type) #retirando a coluna type
+
+
+dados_completo <- dados_completo %>%
+  mutate(across(where(is.factor), as.numeric)) %>%
+  mutate(across(where(is.character), ~ as.numeric(factor(.))))
+
+library(ggcorrplot)
+
+# Matriz de correlaÃ§Ã£o
+cor_AB_matrix <- cor(dados_completo, method = "spearman", use = "complete.obs")
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+cor_AB_matrix[genes_literature, genes_literature] <- NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+cor_AB_matrix[cell_vector_signif,cell_vector_signif] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+cor_AB_matrix <- cor_AB_matrix[genes_literature, cell_vector_signif]
+# Matriz de p-valores
+p.mat <- cor_pmat(dados_completo)
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+p.mat[genes_literature, genes_literature] <- NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+p.mat[cell_vector_signif,cell_vector_signif] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+p.mat <- p.mat[genes_literature, cell_vector_signif]
+
+#ESTRATEGIA
+p.mat[abs(cor_AB_matrix) <= 0.3] <- 1
+
+#correlacao_deconvolucao_GAC
+#correlacao_deconvolucao_PTT
+correlacao_deconvolucao_diffuse = ggcorrplot(t(cor_AB_matrix),
+                      p.mat = t(p.mat),
+                      sig.level = 0.05,
+                      insig = "blank",               # Esconde correlaÃ§Ãµes nÃ£o significativas
+                      type = "full",                 # Matriz completa (nÃ£o sÃ³ triÃ¢ngulo)
+                      lab = TRUE,                    # Mostra valores numÃ©ricos
+                      lab_size = 2.3,
+                      tl.cex = 10,                    # Tamanho dos nomes das variÃ¡veis
+                      tl.srt = 55,
+                      colors = c("#B22222", "white", "#008080"),
+                      outline.color = "gray",
+                      ggtheme = ggplot2::theme_gray) + theme(aspect.ratio = 0.5)
+
+
+
+print(correlacao_deconvolucao_GAC)
+print(correlacao_deconvolucao_diffuse)
+
+cor_AB_matrix = as.data.frame(cor_AB_matrix)
+cor_AB_matrix$gene = rownames(cor_AB_matrix)
+write_xlsx(as.data.frame(cor_AB_matrix), path = "correlacao_deconvolucao_GAC.xlsx")
+
+# Convertendo a tabela para data frame, caso nÃ£o seja
+# 1. Formatar dados
+resultado_df <- as.data.frame(dados_gerais[, c(celulas_deconvolucao, "type")]) %>%
+  rownames_to_column("sample") %>%
+  gather(key = "cell_type", value = "fraction", -type, -sample)
+
+# 2. Total de fraÃ§Ãµes por amostra (usado na legenda)
+total_fractions <- resultado_df %>%
+  group_by(sample) %>%
+  summarise(total = sum(fraction, na.rm = TRUE), .groups = "drop")
+
+# 3. Filtrar apenas cÃ©lulas significantes
+resultado_signif <- resultado_df %>%
+  filter(cell_type %in% cell_vector_signif)
+
+# 4. Para legenda: calcular proporÃ§Ã£o real sobre total (incluindo cÃ©lulas que nÃ£o serÃ£o plotadas)
+legenda_df <- resultado_signif %>%
+  left_join(total_fractions, by = "sample") %>%
+  mutate(real_fraction = fraction / total * 100)
+
+cell_legend <- legenda_df %>%
+  group_by(cell_type, type) %>%
+  summarise(total = sum(real_fraction), .groups = "drop") %>%
+  pivot_wider(names_from = type, values_from = total, values_fill = 0) %>%
+  mutate(
+    Total = GAC + PTT,
+    Percent_GAC = round(GAC / Total * 100, 1),
+    Percent_PTT = round(PTT / Total * 100, 1),
+    Percent_Total = round(Total / sum(Total) * 100, 1),
+    label = paste0(cell_type, " (GAC: ", Percent_GAC, "%, PTT: ", Percent_PTT, "%, Total: ", Percent_Total, "%)")
+  )
+
+# 5. Para grÃ¡fico: normalizar fraÃ§Ã£o apenas entre as cÃ©lulas significantes
+fractions_signif <- resultado_signif %>%
+  group_by(sample) %>%
+  mutate(norm_fraction = fraction / sum(fraction) * 100) %>%
+  ungroup()
+
+# 6. Legendas organizadas
+cell_levels <- cell_vector_signif
+cell_labels_fmt <- cell_legend %>%
+  filter(cell_type %in% cell_levels) %>%
+  arrange(factor(cell_type, levels = cell_levels)) %>%
+  pull(label)
+
+# 7. Plotar grÃ¡fico com fraÃ§Ãµes normalizadas
+fracoescelulares_deconvolucao = ggplot(fractions_signif, aes(x = sample, y = norm_fraction, fill = factor(cell_type, levels = cell_levels))) +
+  geom_bar(stat = "identity") +
+  facet_grid(~ type, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    values = dark2_extended(length(cell_levels)),
+    labels = cell_labels_fmt,
+    breaks = cell_levels) +
+  labs(
+    x = "Samples",
+    y = "Relative fraction (%)") +
+  theme_bw() +
+  theme(
+   # axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+     axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm")
+  ) +
+  guides(fill = guide_legend(ncol = 3, nrow = 6, byrow = TRUE, title = "Cells", position = "bottom"))
+
+
+## concolidaÃ§Ã£o figuras
+
+final_plot <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +  # Reduzi o ylim para ajustarmos melhor o espaÃ§o
+
+  # Linha 1 (GrÃ¡ficos acima)
+  draw_plot(wilcoxon_deconvolucao,           x = 0.00,  y = 0.70, width = 1.00, height = 0.28) +
+  draw_plot(fracoescelulares_deconvolucao,   x = 0.00,  y = 0.35, width = 1.00, height = 0.33) +
+  
+  # Linha 2 (GrÃ¡ficos abaixo)
+  draw_plot(correlacao_deconvolucao_GAC,      x = 0.00,  y = 0.00, width = 0.50, height = 0.40) +  # Ajustei a altura
+  draw_plot(correlacao_deconvolucao_PTT,     x = 0.50,  y = 0.00, width = 0.50, height = 0.40) +  # Ajustei a altura
+
+  # Labels ajustados
+  draw_plot_label(
+    label = c("A", "B", "C", "D"),
+    size = 15,
+    x = c(0.00, 0.00, 0.01, 0.50),
+    y = c(0.97, 0.70, 0.33, 0.33)
+  )
+
+
+# ExportaÃ§Ã£o recomendada
+ggsave("figura_decon_customizado_xmeeting.pdf", plot = final_plot, width = 20, height = 25, units = "in", dpi = 300)
+
+ggsave("figura_decon_customizado_xmeeting.tiff", final_plot,  width = 20, height = 25, units = "in", dpi = 300, compression = "lzw")
+
+```
+
+```{r}
+fig_main <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +  # â†“ altura total reduzida
+
+  # A: Wilcoxon
+  draw_plot(wilcoxon_deconvolucao, x = 0.00, y = 0.47, width = 1.0, height = 0.51) +
+
+  # B e C: agora menores
+  draw_plot(correlacao_deconvolucao_GAC, x = 0.00, y = 0.00, width = 0.50, height = 0.55) +
+  draw_plot(correlacao_deconvolucao_PTT, x = 0.50, y = 0.00, width = 0.50, height = 0.55) +
+
+  # Labels ajustados com precisÃ£o
+  draw_plot_label(
+    label = c("A", "B", "C"),
+    size = 15,
+    x = c(0.00, 0.01, 0.51),
+    y = c(1, 0.48, 0.48)
+  )
+
+# ExportaÃ§Ã£o compacta
+ggsave("figura_deconvolucao_main_OTIMIZADA.pdf", fig_main, width = 20, height = 16, units = "in", dpi = 300)
+ggsave("figura_deconvolucao_main_OTIMIZADA.tiff", fig_main, width = 20, height = 16, units = "in", dpi = 300, compression = "lzw")
+
+
+```
+
+
+```{r}
+library(cowplot)
+
+fig_appendix <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +
+  draw_plot(fracoescelulares_deconvolucao, x = 0, y = 0, width = 1, height = 1) +
+  draw_plot_label(
+    label = "A",
+    size = 15,
+    x = 0.01,
+    y = 0.98
+  )
+
+# ExportaÃ§Ã£o
+ggsave("figura_appendix_fracoes_celulares.pdf", fig_appendix,width = 12, height = 6, units = "in", dpi = 300)
+ggsave("figura_appendix_fracoes_celulares.tiff", fig_appendix, width = 12, height = 6, units = "in", dpi = 300, compression = "lzw")
+
+```
+
+#===================================================================================== 
+#INTEGRAÃ‡ÃƒO
+#===================================================================================== 
+
+```{r}
+
+#CORRELAÃ‡ÃƒO. Verificar se faz sentido selecionar somente o GAC
+library(MASS)
+library(tibble)
+
+
+dados_completo <- dados_gerais %>%  
+  mutate(across(all_of(c(cell_vector_signif, genes_literature, unique(bac_high_class$bac))), ~ log2(. + 1))) %>% #colocar log2 para normalizacao
+  mutate(across(all_of(c(cell_vector_signif, genes_literature, unique(bac_high_class$bac))), ~ scale(.))) %>% 
+
+  dplyr::select(all_of(c(cell_vector_signif, genes_literature, unique(bac_high_class$bac), "type"))) %>% #selecao so das variaveis de interesse
+  dplyr::filter(type == "GAC") %>% #selecionar so cancer
+  dplyr::select(-type) #retirando a coluna type
+
+
+dados_completo <- dados_completo %>%
+#  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), as.numeric)) %>%
+  mutate(across(where(is.character), ~ as.numeric(factor(.))))
+
+library(ggcorrplot)
+
+# Matriz de correlaÃ§Ã£o
+cor_AB_matrix <- cor(dados_completo, method = "spearman", use = "complete.obs")
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+#cor_AB_matrix[genes_literature, genes_literature] <- NA
+
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+#cor_AB_matrix[c(cell_vector_signif, unique(bac_high_class$bac)),c(cell_vector_signif, unique(bac_high_class$bac))] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+#cor_AB_matrix <- cor_AB_matrix[genes_literature, c(cell_vector_signif, unique(bac_high_class$bac))]
+# Matriz de p-valores
+p.mat <- cor_pmat(dados_completo)
+
+# Definir as correlaÃ§Ãµes dentro dos conjuntos codificantes e nÃ£o codificantes como NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto codificante
+#p.mat[genes_literature, genes_literature] <- NA
+# Defina como NA a correlaÃ§Ã£o dentro do conjunto nÃ£o codificante
+#p.mat[c(cell_vector_signif, unique(bac_high_class$bac)),c(cell_vector_signif, unique(bac_high_class$bac))] <- NA
+# Agora, selecione a submatriz apenas das correlaÃ§Ãµes entre os conjuntos codificantes e nÃ£o codificantes
+#p.mat <- p.mat[genes_literature, c(cell_vector_signif, unique(bac_high_class$bac))]
+
+#eSTRATEGIA PARA RETIRAR CORRELAÃ‡Ã•ES MENORES QUE 0,3. 
+p.mat[abs(cor_AB_matrix) <= 0.3] <- 1
+
+
+#integracao_PTT integracao_GAC
+
+integracao_GAC <- ggcorrplot(t(cor_AB_matrix),
+                      p.mat = t(p.mat),
+                      sig.level = 0.05,
+                      insig = "blank",               # Esconde correlaÃ§Ãµes nÃ£o significativas
+                      type = "full",                 # Matriz completa (nÃ£o sÃ³ triÃ¢ngulo)
+                      lab = TRUE,                    # Mostra valores numÃ©ricos
+                      lab_size = 2.5,
+                      tl.cex = 10,                    # Tamanho dos nomes das variÃ¡veis
+                      colors = c("#B22222", "white", "#008080"),
+                   #   outline.color = "gray",
+                      tl.srt = 90,
+                    #  ggtheme = ggplot2::theme_gray,
+                      hc.order	= T,
+                      hc.method = "ward.D2") + theme(aspect.ratio = 0.5)
+
+
+integracao_GAC
+integracao_PTT
+
+#ECREVENDO AS MATRIZES PARA ANALISES VISUAL
+library(tibble)
+library(writexl)
+
+cor_AB_matrix[abs(p.mat) >= 0.05] <- 0
+
+cor_AB_matrixGAC=  cor_AB_matrix %>% as.data.frame %>% rownames_to_column("variavel1") %>% 
+  pivot_longer(
+    cols = -variavel1,           # Todas as colunas exceto "gene"
+    names_to = "variavel2",   # Nome da nova coluna que terÃ¡ os nomes antigos das colunas
+    values_to = "valor"      # Nome da nova coluna que terÃ¡ os valores
+  ) 
+
+
+write_xlsx(as.data.frame(cor_AB_matrixGAC), path = "correlacoes_GAC.xlsx")
+
+
+
+
+cor_AB_matrixPTT=  cor_AB_matrix %>% as.data.frame %>% rownames_to_column("variavel1") %>%
+  pivot_longer(
+    cols = -variavel1,           # Todas as colunas exceto "gene"
+    names_to = "variavel2",   # Nome da nova coluna que terÃ¡ os nomes antigos das colunas
+    values_to = "valor"      # Nome da nova coluna que terÃ¡ os valores
+  ) 
+
+
+
+
+
+write_xlsx(as.data.frame(cor_AB_matrixPTT), path = "correlacoes_PTT.xlsx")
+
+
+#FERRAMENTAS - 
+
+library(factoextra)
+library(dplyr)
+
+# Passo a passo para criar o dendrograma
+clusterizacao_integracao_GAC = dados_completo %>%
+#  dplyr::select(-type) %>%        # Retirar o tipo (nÃ£o queremos clusterizar pela categoria)
+  t() %>%                  # Transpor (amostras como linhas)
+  dist() %>%               # Calcular matriz de distÃ¢ncia
+  hclust(method = "ward.D2") %>%  # Agrupamento hierÃ¡rquico
+  fviz_dend(
+    cex = 0.5,              
+    k = 6,                  # NÃºmero de grupos para cortar o dendrograma. Ã‰ IMPORTANTE VER ANTES COMO DIVIDIR
+    palette = "jco",        
+    horiz = TRUE,            
+#    type = "phylogenic",
+    type = "rectangle",
+
+    phylo_layout = "layout.gem",
+    repel = TRUE,
+#    rect = TRUE
+    
+  ) + theme_void() +
+  ggtitle(NULL) 
+
+clusterizacao_integracao_GAC
+
+clusterizacao_integracao_PTT
+
+# Agora sim vocÃª pode fazer o layout com rotaÃ§Ã£o:
+final_plot_INT <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +
+  # Parte esquerda â€” dendrogramas
+  draw_plot(clusterizacao_integracao_GAC, x = 0.00, y = 0.50, width = 0.20, height = 0.5) +
+  draw_plot(clusterizacao_integracao_PTT, x = 0.00, y = 0.00, width = 0.20, height = 0.5) +
+
+  # Parte direita â€” heatmaps ou correlogramas
+  draw_plot(integracao_GAC, x = 0.20, y = 0.50, width = 0.80, height = 0.5) +
+  draw_plot(integracao_PTT, x = 0.20, y = 0.00, width = 0.80, height = 0.5) +
+
+  # Labels ajustados: A = GAC (top right), B = PTT (bottom right)
+draw_plot_label(
+  label = c("A", "B", "C", "D"),
+  size = 16,
+  fontface = "bold",
+  x = c(0.01, 0.21, 0.01, 0.21),
+  y = c(0.97, 0.97, 0.47, 0.47)
+)
+
+
+ggsave("figura_decon_INT_xmeeting.pdf", plot = final_plot_INT, width = 25, height = 23, units = "in", dpi = 300)
+
+ggsave("figura_decon_INT_xmeeting.tiff", plot = final_plot_INT,  width = 25, height = 23, units = "in", dpi = 300, compression = "lzw")
+
+
+```
+
+```{r}
+final_plot_INT <- ggdraw(xlim = c(0, 1), ylim = c(0, 1)) +
+  # Parte esquerda â€” dendrogramas (acompanham a altura)
+  draw_plot(clusterizacao_integracao_GAC, x = 0.00, y = 0.45, width = 0.20, height = 0.55) +
+  draw_plot(clusterizacao_integracao_PTT, x = 0.00, y = 0.00, width = 0.20, height = 0.45) +
+
+  # Parte direita â€” heatmaps/correlogramas alongados
+  draw_plot(integracao_GAC, x = 0.20, y = 0.45, width = 0.80, height = 0.55) +
+  draw_plot(integracao_PTT, x = 0.20, y = 0.00, width = 0.80, height = 0.45) +
+
+  # Labels
+  draw_plot_label(
+    label = c("A", "B", "C", "D"),
+    size = 16,
+    fontface = "bold",
+    x = c(0.01, 0.21, 0.01, 0.21),
+    y = c(0.99, 0.99, 0.46, 0.46)  # ligeiramente ajustado
+  )
+
+ggsave("figura_decon_INT_xmeeting.pdf", plot = final_plot_INT, width = 25, height = 23, units = "in", dpi = 300)
+
+ggsave("figura_decon_INT_xmeeting.tiff", plot = final_plot_INT,  width = 25, height = 23, units = "in", dpi = 300, compression = "lzw")
+
+
+```
+
+
+```{r}
+
+
+objeto =dados_gerais[, variavel_clinica] %>% dplyr::select(,type,sample, samples, Gender, ypTNM)
+
+table(objeto$type)
+
+
+#preciosidade para o futuro
+library(tidyverse) 
+library(GGally)
+
+ggpairs(dados_completo2, 
+        mapping = aes(color = type),
+        columns = colnames(dados_completo2)[70:83], 
+        columnLabels = colnames(dados_completo2)[70:83]) + 
+  scale_colour_manual(values=c('#B22222','#008080')) +
+  theme_minimal()
+
+
+colnames(dados_completo2)
+
+
+library(pheatmap)
+library(dplyr)
+
+# Primeiro, criar um vetor de anotaÃ§Ã£o para as linhas
+# (pegando a coluna 'type')
+anotacoes_linhas <- dados_completo2 %>%
+  dplyr::select(type) %>%
+  as.data.frame()
+
+# Agora gerar o heatmap com a barra de anotaÃ§Ã£o
+ dados_completo2 %>%
+  dplyr::select(-type) %>%
+  t() %>%
+  t() %>%
+  pheatmap(cutree_cols = 6,
+           clustering_method = "ward.D2",
+           show_rownames = FALSE,
+           annotation_row = anotacoes_linhas) # <-- adiciona a barra
+
+
+library(dplyr)
+library(pheatmap)
+
+# Separar a anotaÃ§Ã£o
+anotacoes_linhas <- dados_completo2 %>%
+  dplyr::select(type) %>%
+  as.data.frame()
+
+# Ordenar os dados e as anotaÃ§Ãµes pela variÃ¡vel 'type'
+dados_ordenados <- dados_completo2 %>%
+  arrange(type)
+
+anotacoes_linhas_ordenadas <- dados_ordenados %>%
+  dplyr::select(type) %>%
+  as.data.frame()
+
+# Remover a coluna 'type' para plotar o heatmap
+matriz_heatmap <- dados_ordenados %>%
+  dplyr::select(-type) %>%
+  t() %>%
+  t()
+
+# Gerar o heatmap
+clusterizacao_integracao2 = pheatmap(matriz_heatmap,
+         cutree_cols = 6,
+         clustering_method = "ward.D2",
+         show_rownames = FALSE,
+         cluster_rows = FALSE,   # NÃƒO reordenar as linhas
+         annotation_row = anotacoes_linhas_ordenadas)
+
+
+
+dados_gerais %>%
+  dplyr::select(sample, Gender, ypTNM, type) %>%  # Seleciona apenas o que interessa
+  dplyr::distinct(sample, .keep_all = TRUE) %>%  
+  dplyr::select(type=="GAC") %>%
+  dplyr::count(ypTNM)  # Conta quantos homens e mulheres
+
+dados_gerais$ypTNM
+```
+
+```{r}
+load()
+```
+
