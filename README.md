@@ -47,6 +47,23 @@ is included in the repo.
   (Newman et al., *Nat. Methods* 2015; LM22)
 * `data/LM22.txt` - LM22 immune-cell signature matrix (public reference)
 
+
+## Instalacao
+
+### Python
+```bash
+pip install scanpy anndata harmonypy celltypist liana leidenalg igraph
+pip install numpy pandas scipy scikit-learn matplotlib seaborn
+```
+
+### R
+```r
+# Bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("DESeq2", "tximport", "clusterProfiler", "survival", "glmnet"))
+install.packages(c("WGCNA", "ggplot2", "patchwork", "ComplexHeatmap"))
+```
+
 ## Stack
 R/Bioconductor: CIBERSORT, quanTIseq (quantiseqr), EPIC, ComplexHeatmap,
 Hmisc, writexl, ggplot2.
